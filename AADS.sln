@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.33328.57
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AADS", "AADS\AADS.csproj", "{F991AEB9-6026-4C41-ACCB-134A121E8370}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F991AEB9-6026-4C41-ACCB-134A121E8370}.Debug|x64.ActiveCfg = Debug|x64
+		{F991AEB9-6026-4C41-ACCB-134A121E8370}.Debug|x64.Build.0 = Debug|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {A320AB1B-68E1-48A7-B009-244C9DACFBCA}
+	EndGlobalSection
+EndGlobal
