@@ -66,7 +66,8 @@ double
     _timeSinceAutofire = 141,
     _maxRaycastRange = 5000,
     _maxTimeForLockBreak = 3,
-    _timeSinceTurretLock = 0;
+    _timeSinceTurretLock = 0,
+    _maxRange = 5000;
 
 bool
     _usePreciseAiming = false,
@@ -83,6 +84,8 @@ bool
 
 const string IgcTagIff = "IGC_IFF_PKT",
     IgcTagRegisterEnemy = "IGC_RGSTR_PKT",
+    IgcTagNetworkUpdate = "IGC_NET_UPD",
+    IgcTagRequestCStream = "IGC_CST_REQ",
     IgcTagParams = "IGC_MSL_PAR_MSG",
     IgcTagHoming = "IGC_MSL_HOM_MSG",
     IgcTagBeamRide = "IGC_MSL_OPT_MSG",
@@ -253,7 +256,13 @@ List<IMyTimerBlock> _statusTimersAnyFire = new List<IMyTimerBlock>(),
 Dictionary<TriggerState, List<IMyTimerBlock>> _statusTimerMap;
 Dictionary<int, List<IMyDoor>> _siloDoorDict = new Dictionary<int, List<IMyDoor>>();
 Dictionary<int, List<IMyTimerBlock>> _fireTimerDict = new Dictionary<int, List<IMyTimerBlock>>();
+
 Dictionary<long, MyTuple<Vector3D, Vector3D, double>> NETWORK_CONTACTS = new Dictionary<long, MyTuple<Vector3D, Vector3D, double>>();
+
+Dictionary<long, MyTuple<Vector3D, Vector3D>> VN_TO_LN_BUFFER = new Dictionary<long, MyTuple<Vector3D, Vector3D>>();
+Dictionary<long, MyTuple<Vector3D, Vector3D>> LN_TO_VN_BUFFER = new Dictionary<long, MyTuple<Vector3D, Vector3D>>();
+Dictionary<long, int> cStreamRequestDict = new Dictionary<long, int>();
+
 StringBuilder _setupStringbuilder = new StringBuilder();
 RuntimeTracker _runtimeTracker;
 RaycastHoming _raycastHoming;
@@ -268,7 +277,7 @@ IMyTerminalBlock _reference = null;
 
 IMyUnicastListener _unicastListener;
 IMyBroadcastListener _remoteFireNotificationListener;
-IMyBroadcastListener _remoteTargetNotificationListener;
+IMyBroadcastListener _vnListener;
 
 ImmutableArray<MyTuple<byte, long, Vector3D, double>>.Builder _messageBuilder = ImmutableArray.CreateBuilder<MyTuple<byte, long, Vector3D, double>>();
 ImmutableArray<MyTuple<Vector3D, Vector3D, long>>.Builder _contactBuilder = ImmutableArray.CreateBuilder<MyTuple<Vector3D, Vector3D, long>>();
@@ -381,8 +390,8 @@ Program()
     _remoteFireNotificationListener = IGC.RegisterBroadcastListener(IgcTagRemoteFireNotification);
     _remoteFireNotificationListener.SetMessageCallback(IgcTagRemoteFireNotification);
 
-    _remoteTargetNotificationListener = IGC.RegisterBroadcastListener(IgcTagRegisterEnemy);
-    //_remoteTargetNotificationListener.SetMessageCallback();
+    _vnListener = IGC.RegisterBroadcastListener(IgcTagRegisterEnemy);
+    //_vnListener.SetMessageCallback();
 
     _raycastHoming = new RaycastHoming(_maxRaycastRange, _maxTimeForLockBreak, _minRaycastRange, Me.CubeGrid.EntityId);
     _raycastHoming.AddEntityTypeToFilter(MyDetectedEntityType.FloatingObject, MyDetectedEntityType.Planet, MyDetectedEntityType.Asteroid);
@@ -416,6 +425,10 @@ Program()
     _scheduler.AddScheduledAction(HandleDisplays, 60);
     _scheduler.AddScheduledAction(BroadcastProcess, UpdatesPerSecond);
     _scheduler.AddScheduledAction(NetworkTargets, 6);
+    _scheduler.AddScheduledAction(writeVNtoLN, 15);
+    _scheduler.AddScheduledAction(writeLNtoVN, 10);
+    _scheduler.AddScheduledAction(cStream, 25);
+    _scheduler.AddScheduledAction(handleLauncher,30); // Handles 
     _scheduler.AddScheduledAction(updateRadarContactTime,60); // Update every tick; IMPORTANT;
     _scheduler.AddScheduledAction(GetLargestGridRadius, 1.0 / 30.0);
     _scheduler.AddScheduledAction(() => AgeFiredPrograms(1), 1);
@@ -506,6 +519,71 @@ void OnNewTargetingStatus()
     }
 }
 
+
+/// <summary>
+/// Handles the c streaming for launchers trying to get missile c streams open/read.
+/// </summary>
+/// <param name="gridId"></param>
+void handleCStream(long gridId)
+        {
+
+            int requestStatus = cStreamRequestDict[gridId];
+            switch (requestStatus)
+            {
+                case 0:// No Request Sent
+                    {
+                        IGC.SendBroadcastMessage(IgcTagRequestCStream, gridId);
+                        cStreamRequestDict[gridId] = 1;
+                        IGC.RegisterBroadcastListener(gridId.ToString());
+                        break;
+                    }
+                case 1: // Request Sent, waiting for response
+                    {
+                        if (IGC.RegisterBroadcastListener(gridId.ToString()).HasPendingMessage)
+                        {
+                            cStreamRequestDict[gridId] = 2;
+                        }
+                        break;
+                    }
+                case 2: // Data is flowing.
+                    {
+                        // cStream is present, launch missile.
+                        // Tell missile what stream to listen to.
+                        FireNextMissile(1);
+                        cStreamRequestDict[gridId] = 3;
+                        break;
+                    }
+                case 3: // Missile already fired
+                    {
+                        break; // Do nothing
+                    }
+                default:
+                    {
+                        break;
+                    }
+            }
+
+        }
+void handleLauncher()
+{
+    /*
+        Check targets, see if they are in range.
+        If in range, request cStream.
+        Once cStream is flowing, fire missile with cStream data.
+        
+     */
+    // Make sure that once we are getting data we dont request for some more.
+
+    if (_gridDuty != GridType.Battery)
+        return;
+    foreach (var contact in NETWORK_CONTACTS)
+    {
+        Vector3D adjustedTarget = contact.Value.Item1 + (contact.Value.Item2 * contact.Value.Item3);
+        double Distance = Vector3D.Distance(adjustedTarget, Me.GetPosition());
+        if (Distance < _maxRange)
+            handleCStream(contact.Key);
+    }
+  }
 void BroadcastProcess()
 {
     if (!_isSetup)
@@ -562,6 +640,8 @@ void BroadcastProcess()
 
 void BroadcastTargetingData()
 {
+     if (_gridDuty == GridType.Battery)
+        return;
     long broadcastKey = GetBroadcastKey();
     switch (DesignationMode)
     {
@@ -574,7 +654,8 @@ void BroadcastTargetingData()
                 broadcastKey);
             break;
         case GuidanceMode.Camera:
-            SendMissileHomingMessage(
+                 SendNetworkHomingMessage(_raycastHoming.TargetId, broadcastKey);
+                 SendMissileHomingMessage(
                 _raycastHoming.HitPosition,
                 _raycastHoming.TargetPosition,
                 _raycastHoming.TargetVelocity,
@@ -585,7 +666,8 @@ void BroadcastTargetingData()
                 broadcastKey);
             break;
         case GuidanceMode.Turret:
-            SendMissileHomingMessage(
+                 SendNetworkHomingMessage(_targetInfo.EntityId, broadcastKey);
+                 SendMissileHomingMessage(
                 _targetInfo.HitPosition.Value,
                 _targetInfo.Position,
                 _targetInfo.Velocity,
@@ -600,6 +682,8 @@ void BroadcastTargetingData()
 
 void BroadcastParameterMessage()
 {
+     if (_gridDuty == GridType.Battery)
+        return;
     long broadcastKey = GetBroadcastKey();
     bool killNow = (_killGuidance && !_hasKilled);
 
@@ -811,30 +895,88 @@ void HandleAutofire(long targetId)
 
 #endregion
 #region NETWORK
-    void processRadarContact(Vector3D contactPosition, Vector3D contactVelocity, long contactId)
+    /// <summary>
+    /// Reads the VN->LN buffer and applies the changes to the LN.
+    /// </summary>
+    void writeVNtoLN()
         {
-            if (NETWORK_CONTACTS.ContainsKey(contactId))
+            while (_vnListener.HasPendingMessage)
             {
-                MyTuple<Vector3D, Vector3D, double> localContactData = NETWORK_CONTACTS[contactId];
-                localContactData.Item1 = contactPosition;
-                localContactData.Item2 = contactVelocity;
-                localContactData.Item3 = 0;
-                NETWORK_CONTACTS[contactId] = localContactData;
+               MyIGCMessage message = _vnListener.AcceptMessage();
+               if (message.Source != Me.GetId()) // Message is not from itself.
+                {
+                    var messageData = (MyTuple<long, Vector3D, Vector3D>)message.Data;
+                    // Create/Update the contact. We update the contact because 
+                    VN_TO_LN_BUFFER[messageData.Item1] = new MyTuple<Vector3D,Vector3D>(messageData.Item2, messageData.Item3);
+                }
+            
             }
-            else
+            // Once Buffer is done.
+            foreach (var contact in VN_TO_LN_BUFFER)
             {
-                // Create new radar contact
-                MyTuple<Vector3D, Vector3D, double> localContactData;
-                localContactData.Item1 = contactPosition;
-                localContactData.Item2 = contactVelocity;
-                localContactData.Item3 = 0;
-                NETWORK_CONTACTS.Add(contactId, localContactData);
+                updateRadarContact(contact.Value.Item1, contact.Value.Item2, contact.Key);
             }
+            VN_TO_LN_BUFFER.Clear();
+            // Clear buffer to save memory.
         }
-        /// <summary>
-        /// Updates the TimeSinceLastUpdate in each RadarContact
-        /// Localized. Resets to 0 every time IGC sends new data.
-        /// </summary>
+    /// <summary>
+    /// Updates the Virtual Network with local network data (ex. Locks)
+    /// In other words, broadcasts the lock data to the Virtual network.
+    /// Does not send LN contacts from the VN, only sends confirmed targets by the LN to the VN.
+    /// </summary>
+    void writeLNtoVN()
+        {
+            // Batteries do not update the Virtual Network.
+            if (_gridDuty == GridType.Battery)
+                return;
+            foreach (var item in LN_TO_VN_BUFFER)
+            {
+                MyTuple<long, Vector3D, Vector3D> Data;
+                Data.Item1 = item.Key;
+                Data.Item2 = item.Value.Item1;
+                Data.Item3 = item.Value.Item2;
+                //Data.Item4 = Me.GetId(); // Origin, not needed because of message.source.
+                IGC.SendBroadcastMessage(IgcTagNetworkUpdate,Data);
+            }
+            LN_TO_VN_BUFFER.Clear();
+        }
+
+    /// <summary>
+    /// Continous Stream. Guides missiles on the VN using the LN stream.
+    /// Called with Broadcast Process.
+    /// </summary>
+    /// <param name="gridId"></param>
+    void cStream()
+     {
+        if (_gridDuty == GridType.Battery) // For now, Batteries cannot cStream.
+                return;
+        /*
+         First. Did we get a C-Stream request? ( Only Batteries can request a CStream )
+         Check locks. Are we locked onto the same grid ID as the cstream request? 
+         Attempt lock.
+         if locked. Send a **response** to the CStream, it now has a hard lock.
+         Start cStream broadcast to gridId channel
+         Battery will then fire a missile listening to said C-Stream.
+         - For Multi-targeting arrays. (not yet added)
+         - Check Radar Bands, Radar bands determine amount of targets we can lock.
+         - LocalNetwork, mark current band as occupied. ( Prevents streaming two dif targets to same missile )
+         
+         */
+        if (_raycastHoming._cStreamActive && _raycastHoming.Status == RaycastHoming.TargetingStatus.Locked)
+            {
+                // Ready to cStream
+                // Start broadcasting.
+                // Also stop cStreaming eventually, when lock is lost. Auto.
+                MyTuple<Vector3D, Vector3D, double> Data = new MyTuple<Vector3D, Vector3D, double>(_raycastHoming.TargetPosition, _raycastHoming.TargetVelocity, _raycastHoming.TimeSinceLastLock);
+                IGC.SendBroadcastMessage(_raycastHoming.TargetId.ToString(), Data); // cStream start.
+            }
+
+     }
+    void addToVNBuffer(long gridId, MyTuple<Vector3D,Vector3D> Data)
+    {
+            LN_TO_VN_BUFFER[gridId] = Data;
+    }
+        
     void updateRadarContactTime()
         {
             foreach (var item in NETWORK_CONTACTS)
@@ -843,6 +985,10 @@ void HandleAutofire(long targetId)
                 localContactData.Item3 += UpdateTime; // (1/60)
                 NETWORK_CONTACTS[item.Key]= localContactData;
             }
+        }
+    void updateRadarContact(Vector3D targetPosition, Vector3D targetVelocity, long key)
+        {
+            NETWORK_CONTACTS[key] = new MyTuple<Vector3D, Vector3D, double>(targetPosition,targetVelocity,0.0);
         }
     MyTuple<Vector3D,Vector3D,double> getRadarContactData(long gridId)
         {
@@ -856,6 +1002,34 @@ void HandleAutofire(long targetId)
                 return data;
             }
 
+        }
+    Vector3D getRadarContactAdjustedPosition(long gridId)
+        {
+            MyTuple<Vector3D, Vector3D, double> contactData = getRadarContactData(gridId);
+            return contactData.Item1 + (contactData.Item2 * contactData.Item3);
+        }
+    double getRadarContactDistance(long gridid)
+        {
+            MyTuple<Vector3D, Vector3D, double> localContactData = NETWORK_CONTACTS[gridid];
+            double Distance = Vector3D.Distance(localContactData.Item1 + localContactData.Item2 * localContactData.Item3, Me.GetPosition());
+            return Distance;
+        }
+    long getClosestRadarContact()
+        {
+            double ShortestDistance = 10000;
+            long networkContact = 0;
+            foreach (var item in NETWORK_CONTACTS)
+            {
+                MyTuple<Vector3D, Vector3D, double> localContactData = NETWORK_CONTACTS[item.Key];
+                double Distance = Vector3D.Distance(localContactData.Item1 + localContactData.Item2 * localContactData.Item3, Me.GetPosition()); // Add time since last ingets to item 2 and 3
+                if (Distance < ShortestDistance)
+                {
+                    ShortestDistance = Distance;
+                    networkContact = item.Key;
+                }
+
+            }
+            return networkContact;
         }
 #endregion
 #region IGC Message Handling
@@ -890,17 +1064,47 @@ void IgcMessageHandling()
         }
     }
     // Add enemyRegister listener to update list of enemies.
-    while (_remoteTargetNotificationListener.HasPendingMessage)
+    long selectedGrid = new long();
+    double selectedGridDistance=5000;
+    while (_vnListener.HasPendingMessage)
     {
-        MyIGCMessage msg = _remoteTargetNotificationListener.AcceptMessage();
+        MyIGCMessage msg = _vnListener.AcceptMessage();
         // Should send, enemyGridId, Position, Velocity.
-        if (msg.Data is MyTuple<Vector3D,Vector3D,long>)
+        if (msg.Tag == IgcTagNetworkUpdate)
         {
             var payload = (MyTuple<Vector3D,Vector3D, long>)msg.Data;
             //myTuple = new MyTuple<byte, long, Vector3D, double>((byte)relation, targetId, targetPos, 0);
             // v3d, v3d, double, long
-            processRadarContact(payload.Item1,payload.Item2,payload.Item3);
+            updateRadarContact(payload.Item1,payload.Item2,payload.Item3);
         }
+        else if (msg.Tag == IgcTagRequestCStream)
+        {
+            double dist = getRadarContactDistance((long)msg.Data);
+            if (dist < selectedGridDistance)
+                    {
+                        selectedGrid = (long)msg.Data;
+                        selectedGridDistance = dist;
+                    }
+        }
+    if (selectedGrid != new long())
+        {
+            // A C Stream was requested 
+            if (_raycastHoming.TargetId == selectedGrid)
+                    {
+                        // ready to C Stream
+                       
+                    }
+            else // not locked to C Stream
+                    {
+                        _raycastHoming.ClearLock();
+                        _raycastHoming.LockOn();
+                        _raycastHoming.cStream(getRadarContactAdjustedPosition(selectedGrid), selectedGrid);
+                    }
+            // Make as able to C-Stream.
+            // Return a message telling missile we can now c stream.
+            // Start C-Stream broadcast.
+        }
+
        
     }
 }
@@ -1052,7 +1256,7 @@ void NetworkTargets()
     var myTuple = new MyTuple<byte, long, Vector3D, double>((byte)(TargetRelation.Friendly | myType), _biggestGrid.EntityId, _biggestGrid.WorldVolume.Center, _biggestGridRadius * _biggestGridRadius);
     _messageBuilder.Add(myTuple);
 
-    if (hasTarget)
+    if (hasTarget && _gridDuty != GridType.Battery)
     {
         MyRelationsBetweenPlayerAndBlock relationBetweenPlayerAndBlock;
         MyDetectedEntityType type;
@@ -1127,7 +1331,7 @@ void NetworkTargets()
 
         myTuple = new MyTuple<byte, long, Vector3D, double>((byte)relation, targetId, targetPos, 0);
         var networkTuple = new MyTuple<Vector3D, Vector3D, long>(targetPos,targetVel,targetId);
-        processRadarContact(targetPos, targetVel, targetId); // UpdateOwn Target data.
+        updateRadarContact(targetPos, targetVel, targetId); // UpdateOwn Target data.
         _messageBuilder.Add(myTuple);
         _contactBuilder.Add(networkTuple); 
     }
@@ -1138,6 +1342,14 @@ void NetworkTargets()
                 IGC.SendBroadcastMessage(IgcTagRegisterEnemy, _contactBuilder.MoveToImmutable());
             }
     //RequestRemoteMissileFire();
+    if (_gridDuty == GridType.Battery)
+            {
+                long closestGridId = getClosestRadarContact();// TODO: Provide a sorted list of closest crafts.
+                MyTuple<Vector3D, Vector3D, double> contactData = getRadarContactData(closestGridId);
+                // Position, Velocity, timeSinceLastLock
+                // Request C-Stream
+                //FireNextMissile(1);
+            }
 }
 #endregion
 
@@ -1227,7 +1439,7 @@ void ParseArguments(string arg)
             break;
 
         case "fire":
-            if (FiringAllowed)
+            if (FiringAllowed && _gridDuty == GridType.Battery)
             {
                 int count = 1, start = 0, end = -1;
                 bool useRange = false;
@@ -2800,6 +3012,19 @@ void PopulateMatrix3x3Columns(ref Matrix3x3 mat, ref Vector3D col0, ref Vector3D
 }
 
 
+
+void SendNetworkHomingMessage(long gridId, long keycode)
+    //Vector3D lastHitPosition, Vector3D targetPosition, Vector3D targetVelocity, Vector3D preciseOffset, Vector3D shooterPosition, double timeSinceLastLock, long targetId, long keycode)
+{
+    MyTuple<Vector3D, Vector3D, double> contactData = getRadarContactData(gridId);
+            Vector3D targetPosition = contactData.Item1;
+            Vector3D targetVelocity = contactData.Item2;
+    var actualPayload = new MyTuple<Vector3D,Vector3D>(targetPosition,targetVelocity);
+    //IGC.SendBroadcastMessage(IgcTagHoming, payload);
+    // Sends target data to the VN.
+    addToVNBuffer(gridId, actualPayload);
+}
+
 void SendMissileHomingMessage(Vector3D lastHitPosition, Vector3D targetPosition, Vector3D targetVelocity, Vector3D preciseOffset, Vector3D shooterPosition, double timeSinceLastLock, long targetId, long keycode)
 {
     var matrix1 = new Matrix3x3();
@@ -2817,7 +3042,7 @@ void SendMissileHomingMessage(Vector3D lastHitPosition, Vector3D targetPosition,
         Item5 = keycode,
     };
 
-    IGC.SendBroadcastMessage(IgcTagHoming, payload);
+    //IGC.SendBroadcastMessage(IgcTagHoming, payload);
 }
 
 void SendMissileBeamRideMessage(Vector3D forward, Vector3D left, Vector3D up, Vector3D shooterPosition, long keycode)
@@ -2831,7 +3056,7 @@ void SendMissileBeamRideMessage(Vector3D forward, Vector3D left, Vector3D up, Ve
         Item5 = keycode
     };
 
-    IGC.SendBroadcastMessage(IgcTagBeamRide, payload);
+   // IGC.SendBroadcastMessage(IgcTagBeamRide, payload);
 }
 
 void SendMissileParameterMessage(bool kill, bool stealth, bool spiral, bool topdown, bool precise, bool retask, long keycode)
@@ -2937,6 +3162,9 @@ class RaycastHoming
     public MyRelationsBetweenPlayerAndBlock TargetRelation { get; private set; }
     public MyDetectedEntityType TargetType { get; private set; }
 
+    public bool _cStreamActive = false;
+    public Vector3D _cStreamLKP = new Vector3D();
+
     public enum TargetingStatus { NotLocked, Locked, TooClose };
     enum AimMode { Center, Offset, OffsetRelative };
 
@@ -3008,6 +3236,16 @@ class RaycastHoming
         ClearLockInternal();
         LockLost = false;
         IsScanning = true;
+    }
+    /// <summary>
+    ///  Requries the adjusedTargetPosition to be the actual position 
+    /// </summary>
+    /// <param name="adjustedTargetPosition"></param>
+    public void cStream(Vector3D adjustedTargetPosition, long gridId)
+    {
+        _cStreamLKP = adjustedTargetPosition;
+        _cStreamActive = true;
+        TargetId = gridId;
     }
 
     public void ClearLock()
@@ -3184,7 +3422,9 @@ class RaycastHoming
         if (camera.AvailableScanRange >= MaxRange &&
             _timeSinceLastScan >= AutoScanInterval)
         {
-            if (reference != null)
+            if (_cStreamActive)
+                info = camera.Raycast(_cStreamLKP);
+            else if (reference != null)
             {
                 info = camera.Raycast(GetSearchPos(reference.GetPosition(), reference.WorldMatrix.Forward, camera));
             }
@@ -3284,6 +3524,8 @@ class RaycastHoming
         if (TimeSinceLastLock > (MaxTimeForLockBreak + AutoScanInterval) && (Status == TargetingStatus.Locked || _manualLockOverride))
         {
             LockLost = true; // TODO: Change this to a callback
+            if (_cStreamActive)
+                _cStreamActive = false;
             ClearLockInternal();
             return;
         }
