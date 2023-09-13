@@ -548,8 +548,9 @@ void handleCStream(long gridId)
                 case 2: // Data is flowing.
                     {
                         // cStream is present, launch missile.
-                        // Tell missile what stream to listen to.
-                        FireNextMissile(1);
+                        // Tell missile what stream to listen to
+                        // 
+                        FireNextMissile(1, gridId);
                         cStreamRequestDict[gridId] = 3;
                         break;
                     }
@@ -1465,11 +1466,11 @@ void ParseArguments(string arg)
 
                 if (useRange)
                 {
-                    FireMissileInRange(count, start, end);
+                    //FireMissileInRange(count, start, end);
                 }
                 else
                 {
-                    FireNextMissile(count);
+                    //FireNextMissile(count);
                 }
             }
             else
@@ -2191,7 +2192,7 @@ void AlphaStrike()
 
     foreach (var missileNumber in _currentMissileNumbers)
     {
-        FireMissilePrograms(missileNumber);
+        //FireMissilePrograms(missileNumber);
     }
 }
 
@@ -2201,7 +2202,7 @@ bool IsMissilePBValid(IMyTerminalBlock b)
     return pb.IsWorking && !_firedMissileProgramAge.ContainsKey(pb);
 }
 
-bool FireMissilePrograms(int missileNumber)
+bool FireMissilePrograms(int missileNumber, long cStreamId)
 {
     IMyBlockGroup group = null;
     if (!_missileNumberDict.TryGetValue(missileNumber, out group))
@@ -2218,20 +2219,20 @@ bool FireMissilePrograms(int missileNumber)
 
     foreach (var pb in _missilePrograms)
     {
-        IGC.SendUnicastMessage(pb.EntityId, IgcTagFire, "");
+        IGC.SendUnicastMessage(pb.EntityId, IgcTagFire, cStreamId.ToString());
         _firedMissileProgramAge[pb] = 0;
     }
 
     OpenSiloDoor(missileNumber);
     TriggerFireTimer(missileNumber);
 
-    BroadcastTargetingData();
-    BroadcastParameterMessage();
+    //BroadcastTargetingData();
+    //BroadcastParameterMessage();
 
     return true;
 }
 
-void FireMissileInRange(int numberToFire, int start, int end)
+void FireMissileInRange(int numberToFire, int start, int end, long cStreamId)
 {
     GetCurrentMissiles();
 
@@ -2243,7 +2244,7 @@ void FireMissileInRange(int numberToFire, int start, int end)
             continue;
         }
 
-        bool fired = FireMissilePrograms(missileNumber);
+        bool fired = FireMissilePrograms(missileNumber, cStreamId);
         if (fired)
         {
             numberFired++;
@@ -2256,14 +2257,14 @@ void FireMissileInRange(int numberToFire, int start, int end)
     }
 }
 
-void FireNextMissile(int numberToFire)
+void FireNextMissile(int numberToFire, long cStreamId)
 {
     GetCurrentMissiles();
 
     int numberFired = 0;
     foreach (var missileNumber in _currentMissileNumbers)
     {
-        bool fired = FireMissilePrograms(missileNumber);
+        bool fired = FireMissilePrograms(missileNumber,cStreamId);
         if (fired)
         {
             numberFired++;
